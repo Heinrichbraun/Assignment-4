@@ -1,5 +1,0 @@
-# No version pins needed. xgboost-cpu = XGBoost without the huge GPU dependency.
-streamlit
-xgboost-cpu
-pandas
-scikit-learn
