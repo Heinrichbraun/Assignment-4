@@ -13,6 +13,7 @@ from portable import Model
 
 URL = "https://raw.githubusercontent.com/aaubs/ds-master/main/assignments/study-office/data/"
 MODEL_DIR = Path(__file__).parent / "model"
+TALK_G, WORRY_G, LEAVE_G, HELPS_G = 500, 2000, 60000, 0.30   # costs used in the game
 LEAKS = ["student_id", "cohort", "left", "ects_passed_sem1", "deregistration_form_opened", "last_login_week"]
 NICE = {"logins_total": "logins weeks 1-6", "logins_last3": "logins last 3 weeks", "logins_trend": "login trend",
         "submitted_share": "assignments handed in", "missed_last3": "assignments missed (last 3 wks)",
@@ -98,8 +99,8 @@ with st.sidebar:
     st.caption(f"Model: {source}. Learned from 2023-2024, checked on 2025 ({len(val)} students).")
 
 st.title("🎓 Who should the study office talk to this week?")
-t_list, t_rule, t_group, t_cost = st.tabs(["📋 This week's list", "⚖️ Mistakes of the rule",
-                                           "🌍 Fair to whom?", "💶 Costs & best rule"])
+t_list, t_rule, t_group, t_cost, t_game = st.tabs(["📋 This week's list", "⚖️ Mistakes of the rule",
+                                                   "🌍 Fair to whom?", "💶 Costs & best rule", "🎲 Play: be the adviser"])
 
 with t_list:
     st.markdown(f"All **{len(new)}** students of this year, ranked by risk of leaving. "
@@ -151,3 +152,55 @@ with t_cost:
     st.success(f"Best cut-off: **{cuts[best]:.2f}** → {k['contacted']} conversations, net value about {value[best]:,.0f} DKK on 2025.")
     st.line_chart(pd.DataFrame({"cut-off": cuts, "net value (DKK)": value}), x="cut-off", y="net value (DKK)")
     st.caption(f"With capacity for only {40} conversations, the cost-optimal rule may be out of reach: compare with the sidebar.")
+
+# ---------------------------------------------------------------- the game
+with t_game:
+    CAP, SIZE = 5, 25
+    ss = st.session_state
+    ss.setdefault("round", 0); ss.setdefault("done", False); ss.setdefault("totals", {"you": 0.0, "model": 0.0, "gus": 0.0})
+    r = ss.round
+    batch = val.sample(SIZE, random_state=r + 1).reset_index(drop=True)
+    st.markdown(f"It is week 6. **{SIZE} students** from the 2025 cohort are on your desk, and you only have time for "
+                f"**{CAP} conversations**. Tick the ones you would talk to. Afterwards you see who really left, and how you did "
+                "against the model and against **Gut-Feeling Gus**, who simply calls the students who hand in the least.")
+    hints = st.toggle("Show the model's risk", value=True, help="Hard mode: off.")
+    show = batch[["student_id", "programme", "submitted_share", "logins_last3", "quiz_mean", "weeks_since_login", "fees_owed"]].copy()
+    if hints:
+        show["model risk"] = batch["risk"].round(2)
+    show.insert(0, "talk", False)
+    edited = st.data_editor(show, hide_index=True, width="stretch", key=f"ed{r}",
+                            disabled=[c for c in show.columns if c != "talk"] if not ss.done else True)
+    mine = edited["talk"].to_numpy()
+    st.caption(f"Selected: {int(mine.sum())} of {CAP}")
+    if mine.sum() > CAP:
+        st.error(f"Only {CAP} conversations are possible. Untick {int(mine.sum()) - CAP}.")
+    if not ss.done:
+        if st.button("🚪 Reveal who left", type="primary", disabled=bool(mine.sum() > CAP)):
+            ss.done = True
+            st.rerun()
+    else:
+        y = batch["left"].to_numpy()
+        flags = {"you": mine,
+                 "model": (batch["risk"].rank(ascending=False, method="first") <= CAP).to_numpy(),
+                 "gus": (batch["submitted_share"].rank(method="first") <= CAP).to_numpy()}
+        res = {}
+        for who, f in flags.items():
+            b = boxes(y, f)
+            res[who] = (b["reached"] * HELPS_G * LEAVE_G - b["contacted"] * TALK_G - b["worried"] * WORRY_G, b)
+        if "counted" not in ss or ss.counted != r:
+            for who in res:
+                ss.totals[who] += res[who][0]
+            ss.counted = r
+        c1, c2, c3 = st.columns(3)
+        for c, (who, name) in zip((c1, c2, c3), [("you", "You"), ("model", "The model"), ("gus", "Gut-Feeling Gus")]):
+            b = res[who][1]
+            c.metric(name, f"{res[who][0]:,.0f} DKK", f"{b['reached']} reached · {b['worried']} worried for nothing")
+        st.markdown(f"**{int(y.sum())} of the {SIZE} students left.** You missed **{res['you'][1]['missed']}** of them.")
+        st.dataframe(batch[batch["left"] == 1][["student_id", "programme", "submitted_share", "logins_last3", "risk"]]
+                     .rename(columns={"risk": "model risk"}), hide_index=True, width="stretch")
+        t = ss.totals
+        st.caption(f"Total after {r + 1} round(s): you {t['you']:,.0f} · model {t['model']:,.0f} · Gus {t['gus']:,.0f} DKK "
+                   "(500 DKK per conversation, 2,000 per false alarm, 30 % of leavers kept, 60,000 DKK each).")
+        if st.button("➡️ Next batch of students", type="primary"):
+            ss.round += 1; ss.done = False
+            st.rerun()
